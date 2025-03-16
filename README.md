@@ -1,69 +1,127 @@
-# Cities Skylines II Heightmap and Worldmap Generator
+# Cities Skylines II Heightmap Generator
 
-This project is intended to output a Cities Skylines II Heightmap and Worldmap from a place name or a set of coordinates. 
+This tool generates heightmaps compatible with Cities Skylines 2 using high-resolution elevation data from USGS 3DEP (3D Elevation Program). It creates both the base heightmap and extended worldmap as required by the game. Currently limited to locations within the continental United States to ensure highest quality data.
 
-We can use ArcGIS REST servers like `https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/` to get elevation data and output the required files. This project will fetch the DEM or other Heightmap data from an ArcGIS REST server, then convert the data to a height map (4096x4096 pixels, 14336 meters (14.336 km x 14.336 km)) and a world map (57344 meters) in Grayscale, 16-bit color channel depth, .png or .tiff.
+## Features
+
+- Generate heightmaps from any location in the continental US using coordinates or place names
+- Automatic download of highest resolution available USGS 3DEP data (up to 1-meter resolution where available)
+- Creates 16-bit PNG and TIFF heightmaps at optimal resolution
+- Generates both detailed core heightmap (14.336 x 14.336 km) and extended worldmap (57.344 x 57.344 km)
+- Ensures consistent elevation scaling between core area and worldmap
+- Handles no-data values and seamlessly fills gaps
+- Includes visualization of the generated heightmaps with area indicators
 
 ## Installation
 
 1. Clone the repository:
-    ```
-    git clone https://github.com/githubnext/workspace-blank.git
-    cd workspace-blank
-    ```
+   ```bash
+   git clone https://github.com/yourusername/heightmap-generator.git
+   cd heightmap-generator
+   ```
 
 2. Install the required dependencies:
-    ```
-    pip install -r requirements.txt
-    ```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ## Usage
 
-1. Run the main script with a place name or coordinates as input:
-    ```
-    python main.py "Place Name" or
-    python main.py "latitude,longitude"
-    ```
+### Using main.py (Recommended)
 
-2. The generated heightmap and world map will be saved in the output directory.
+The simplified interface accepts either place names or coordinates:
 
-## Example
-
-To generate a heightmap and world map for New York City:
-```
-python main.py "New York City"
+```bash
+python main.py "Mount Mitchell, NC"
 ```
 
-To generate a heightmap and world map for specific coordinates:
-```
-python main.py "40.7128,-74.0060"
-```
+or
 
-## Project Description
-
-This project is intended to output a Cities Skylines II Heightmap and Worldmap from a place name or a set of coordinates. We can use ArcGIS REST servers like `https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/` to get elevation data and output the required files. This project will fetch the DEM or other Heightmap data from an ArcGIS REST server, then convert the data to a height map (4096x4096 pixels, 14336 meters (14.336 km x 14.336 km)) and a world map (57344 meters) in Grayscale, 16-bit color channel depth, .png or .tiff.
-
-## Installation Instructions
-
-1. Clone the repository:
-    ```
-    git clone https://github.com/githubnext/workspace-blank.git
-    cd workspace-blank
-    ```
-
-2. Install the required dependencies:
-    ```
-    pip install -r requirements.txt
-    ```
-
-## Example Usage
-
-To generate a heightmap and world map for New York City:
-```
-python main.py "New York City"
+```bash
+python main.py "35.7648,-82.2652"
 ```
 
-To generate a heightmap and world map for specific coordinates:
+### Using heightmap_generator.py (Advanced)
+
+For more control over the generation process:
+
+```bash
+python heightmap_generator.py --lat 35.7648 --lon -82.2652 --visualize
 ```
-python main.py "40.7128,-74.0060"
-```
+
+#### Required arguments:
+- `--lat` - Latitude of the center point
+- `--lon` - Longitude of the center point
+
+#### Optional arguments:
+- `--output` - Output directory (default: 'elevation_output')
+- `--visualize` - Create visualization of the heightmaps
+- `--no-worldmap` - Skip worldmap generation
+- `--name` - Custom name for output files (overrides automatic location naming)
+
+## Output Files
+
+The generator creates:
+1. Core heightmap (4096x4096) covering 14.336 x 14.336 km playable area
+   - 16-bit PNG (game format)
+   - 16-bit TIFF (for GIS applications)
+2. Extended worldmap (4096x4096) covering 57.344 x 57.344 km area
+   - 16-bit PNG (game format)
+   - 16-bit TIFF (for GIS applications)
+3. Visualization image showing both maps with area indicators
+
+## Technical Details
+
+- **Core heightmap**: 4096×4096 pixels covering 14.336×14.336 km (3.5m per pixel)
+- **Game playable area**: Matches the core heightmap area
+- **Extended worldmap**: 4096×4096 pixels covering 57.344×57.344 km
+- **Format**: 16-bit grayscale PNG/TIFF
+- **Data source**: USGS 3DEP (3D Elevation Program)
+- **Resolution**: Up to 1-meter where available, minimum 10-meter nationwide
+
+## Requirements
+
+- Python 3.7+
+- Internet connection for downloading USGS elevation data
+- Dependencies:
+  - requests
+  - numpy
+  - Pillow
+  - matplotlib
+  - rasterio
+  - scipy
+  - geopy (for place name geocoding)
+
+## Examples
+
+1. Generate a heightmap for Great Smoky Mountains:
+   ```bash
+   python main.py "Great Smoky Mountains National Park"
+   ```
+
+2. Generate a heightmap for Mount Rainier:
+   ```bash
+   python main.py "Mount Rainier"
+   ```
+
+3. Generate a heightmap for a specific location in the Grand Canyon:
+   ```bash
+   python main.py "36.0544,-112.1401"
+   ```
+
+## Importing into Cities Skylines 2
+
+1. Place the generated `.png` files in your game's heightmap folder:
+   - Core heightmap: `<location_name>.png`
+   - Worldmap: `<location_name>_worldmap.png`
+   
+   The default location is: `C:\Users\<username>\AppData\LocalLow\Colossal Order\Cities Skylines II\Maps`
+
+2. Start a new game and select "Create New Map"
+3. Choose your heightmap from the list
+
+## Limitations
+
+- Currently only supports locations within the continental United States
+- Elevation data quality varies by region (best in urban and high-interest areas)
+- Maximum resolution depends on available USGS 3DEP data for the area
