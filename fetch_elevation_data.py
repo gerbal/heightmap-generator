@@ -8,9 +8,6 @@ import tempfile
 import rasterio
 from rasterio.transform import from_bounds
 from scipy.ndimage import zoom
-import mercantile
-from PIL import Image
-from io import BytesIO
 
 # Continental US bounding box (approximate)
 # Format: (min_lon, min_lat, max_lon, max_lat)
@@ -111,48 +108,115 @@ def fetch_elevation_data(place_name_or_coordinates, for_worldmap=False):
         # This ensures we get maximum resolution where it matters most
         bbox = calculate_bounding_box(lat, lon, width_km=14.336, height_km=14.336)
     
-    print(f"Using USGS 3DEP service for {'worldmap' if for_worldmap else 'core heightmap'}...")
+    print(f"Using USGS 3DEP elevation service for {'worldmap' if for_worldmap else 'core heightmap'}...")
     
-    # Fetch elevation data from USGS 3DEP service
+    # Query for available high-resolution data
+    arcgis_url = "https://index.nationalmap.gov/arcgis/rest/services/3DEPElevationIndex/MapServer/find"
+    params = {
+        "searchText": "elevation",
+        "contains": "true",
+        "searchFields": "ProjectName",
+        "sr": "4326",  # WGS84
+        "layers": "all",
+        "returnGeometry": "true",
+        "f": "json",
+        "geometryType": "esriGeometryEnvelope",
+        "spatialRel": "esriSpatialRelIntersects",
+        "geometry": json.dumps({
+            "xmin": bbox[0],
+            "ymin": bbox[1],
+            "xmax": bbox[2],
+            "ymax": bbox[3],
+            "spatialReference": {"wkid": 4326}
+        })
+    }
+    
+    try:
+        print("Checking for available high-resolution data...")
+        response = requests.get(arcgis_url, params=params)
+        data = response.json()
+        
+        if 'results' in data and len(data['results']) > 0:
+            best_resolution = float('inf')
+            best_result = None
+            
+            for result in data['results']:
+                if 'attributes' in result:
+                    attrs = result['attributes']
+                    if 'Resolution' in attrs and attrs['Resolution'] < best_resolution:
+                        best_resolution = attrs['Resolution']
+                        best_result = result
+            
+            if best_result:
+                print(f"Found best available resolution: {best_resolution}m")
+    except Exception as e:
+        print(f"Error querying resolution data: {e}")
+    
+    # Make the actual elevation request
     elevation_service_url = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
+    
+    # Start with 5120x5120 for core heightmap (still higher than base resolution but less likely to timeout)
+    # For worldmap, keep the standard 4096x4096
+    size = "4096,4096" if for_worldmap else "5120,5120"
+    
+    # Use cubic interpolation for best quality
+    interpolation = "RSP_CubicConvolution" if not for_worldmap else "RSP_BilinearInterpolation"
+    
     params = {
         "bbox": f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
         "bboxSR": 4326,  # WGS84
-        "size": "4096,4096" if not for_worldmap else "1024,1024",
+        "size": size,
         "imageSR": 4326,
         "format": "tiff",
         "pixelType": "F32",
-        "interpolation": "RSP_BilinearInterpolation",
+        "interpolation": interpolation,
         "f": "json"
     }
     
-    response = requests.get(elevation_service_url, params=params)
-    response.raise_for_status()  # Raise an exception for error status codes
-    image_info = response.json()
+    try:
+        print(f"Requesting elevation data at {size} resolution...")
+        response = requests.get(elevation_service_url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        if 'href' in data:
+            img_url = data['href']
+            print(f"Found USGS 3DEP data: {img_url}")
+            img_response = requests.get(img_url)
+            img_response.raise_for_status()
+            
+            # Save the raw data to a temporary file
+            temp_dir = tempfile.gettempdir()
+            raw_tiff_path = os.path.join(temp_dir, f"raw_elevation{'_worldmap' if for_worldmap else ''}.tiff")
+            
+            with open(raw_tiff_path, 'wb') as f:
+                f.write(img_response.content)
+                
+            print(f"Downloaded elevation data to {raw_tiff_path}")
+            
+            # Validate the downloaded data
+            try:
+                with rasterio.open(raw_tiff_path) as src:
+                    print(f"Data resolution: {src.width}x{src.height}, {src.count} bands, dtype: {src.dtypes[0]}")
+                    
+                return {
+                    'data_path': raw_tiff_path,
+                    'lat': lat,
+                    'lon': lon,
+                    'bbox': bbox,
+                    'source': 'USGS 3DEP',
+                    'for_worldmap': for_worldmap
+                }
+            except Exception as e:
+                print(f"Warning: TIFF validation failed: {e}")
+                raise
     
-    if 'href' in image_info:
-        # Download the image
-        img_url = image_info['href']
-        print(f"Found direct download URL: {img_url}")
-        img_response = requests.get(img_url)
-        img_response.raise_for_status()
-        
-        # Save the raw data to a temporary file
-        temp_dir = tempfile.gettempdir()
-        raw_tiff_path = os.path.join(temp_dir, "raw_elevation.tiff")
-        with open(raw_tiff_path, 'wb') as f:
-            f.write(img_response.content)
-        
-        return {
-            'data_path': raw_tiff_path,
-            'lat': lat,
-            'lon': lon,
-            'bbox': bbox,
-            'source': 'USGS 3DEP',
-            'for_worldmap': for_worldmap
-        }
-    else:
-        raise ValueError("Failed to fetch elevation data from USGS 3DEP service.")
+    except Exception as e:
+        print(f"Error fetching USGS elevation data: {e}")
+        if not for_worldmap:  # Only try fallback for core heightmap
+            print("Falling back to Open-Elevation API...")
+            return fetch_from_open_elevation(lat, lon, bbox)
+        raise
 
 def fetch_from_open_elevation(lat, lon, bbox):
     """Fallback method using Open-Elevation API"""
@@ -215,6 +279,37 @@ def fetch_from_open_elevation(lat, lon, bbox):
         raise
 
 def parse_elevation_data(data):
-    # Assuming the data contains a 'value' field with elevation values
-    elevation_values = data['value']
-    return elevation_values
+    """
+    Parse the downloaded elevation data.
+    
+    Args:
+        data (dict): Data from fetch_elevation_data()
+        
+    Returns:
+        array: Numpy array of elevation values
+    """
+    try:
+        import rasterio
+        from scipy import ndimage
+        
+        with rasterio.open(data['data_path']) as src:
+            elevation_array = src.read(1)
+            
+            # Handle no-data values
+            no_data = src.nodata
+            if no_data is not None:
+                mask = elevation_array == no_data
+                if mask.any():
+                    from heightmap_generator import interpolate_nodata
+                    elevation_array = interpolate_nodata(elevation_array, mask)
+            
+            # Handle NaN or infinite values
+            if np.isnan(elevation_array).any() or np.isinf(elevation_array).any():
+                mask = np.logical_or(np.isnan(elevation_array), np.isinf(elevation_array))
+                from heightmap_generator import interpolate_nodata
+                elevation_array = interpolate_nodata(elevation_array, mask)
+        
+        return elevation_array
+    except Exception as e:
+        print(f"Error parsing elevation data: {e}")
+        raise

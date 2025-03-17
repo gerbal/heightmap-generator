@@ -4,8 +4,8 @@ Cities Skylines 2 Heightmap Generator
 
 This script downloads and processes elevation data to create heightmaps compatible with 
 Cities Skylines 2. It:
-1. Takes a center point of interest (latitude/longitude)
-2. Queries available elevation data from USGS 3DEP
+1. Takes a center point of interest (latitude/longitude) within the continental United States
+2. Queries available elevation data
 3. Downloads the best quality data
 4. Processes it into heightmaps conforming to CS2 requirements:
    - Base heightmap (4096x4096)
@@ -335,17 +335,7 @@ def sanitize_filename(name):
     name = name.strip()[:50]
     return name
 
-# CS2-specific configuration
-cs2_config = {
-    'map_size': 57.344,  # km
-    'resolution': 4096,  # pixels
-    'elevation_scale': 4096,  # scale
-    'origin_correction': 0  # no correction needed
-}
-
-# Updated process_heightmap function to use CS2-specific settings
-
-def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_name=None, elevation_range=None, max_height=4096, create_worldmap=True, target_platform='CS1', base_level=0, vert_scale=1, elevation_scale=4096):
+def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_name=None, elevation_range=None, max_height=4096, create_worldmap=True):
     """
     Process the raw elevation data into a CS2 compatible heightmap.
     
@@ -353,6 +343,7 @@ def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_nam
         raw_tiff_path (str): Path to the raw elevation TIFF file
         output_dir (str): Directory to save processed heightmaps
         location_name (str): Name of the location (for file naming)
+        elevation_range (dict): Optional elevation range to use for normalization {'min': float, 'max': float}
         max_height (int): Maximum height scale for CS2
         create_worldmap (bool): Whether to create an extended worldmap
         target_platform (str): Target platform ('CS1' or 'CS2')
@@ -376,13 +367,13 @@ def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_nam
         
         # Read the raw elevation data
         with rasterio.open(raw_tiff_path) as src:
-            print(f"Raster info: {src.width}x{src.height}, {src.count} bands, dtype: {src.dtypes[0]}")
+            print(f"Processing raster: {src.width}x{src.height}, {src.count} bands, dtype: {src.dtypes[0]}")
             
             elevation_data = src.read(1)  # Read the first band
             
             # Check if this is worldmap data based on file name
             is_worldmap = 'worldmap' in raw_tiff_path.lower()
-            target_size = cs2_config['resolution'] if target_platform == 'CS2' else 4096
+            target_size = 4096
             
             # If this is high-resolution core data (6144x6144), downsample to 4096x4096
             if elevation_data.shape[0] > target_size or elevation_data.shape[1] > target_size:
@@ -393,30 +384,37 @@ def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_nam
             no_data = src.nodata
             if no_data is not None:
                 print(f"No-data value: {no_data}")
-                # Replace no-data with neighboring values
                 mask = elevation_data == no_data
                 if mask.any():
                     print(f"Found {mask.sum()} no-data pixels. Interpolating...")
                     elevation_data = interpolate_nodata(elevation_data, mask)
             
-            # Handle any remaining NaN or infinite values
+            # Handle NaN or infinite values
             if np.isnan(elevation_data).any() or np.isinf(elevation_data).any():
                 print("Found NaN or Inf values. Replacing with valid neighbor values...")
                 mask = np.logical_or(np.isnan(elevation_data), np.isinf(elevation_data))
                 elevation_data = interpolate_nodata(elevation_data, mask)
             
             # Get statistics for normalization
-            min_elev = np.min(elevation_data)
-            max_elev = np.max(elevation_data)
-            elev_range = max_elev - min_elev
-            
-            if elev_range == 0:
-                print("Warning: Flat terrain detected (no elevation difference)")
-                # Add small random variations for visual interest
-                elevation_data = elevation_data + np.random.rand(*elevation_data.shape) * 0.1
+            if elevation_range is not None:
+                # Use provided elevation range for consistent scaling
+                min_elev = elevation_range['min']
+                max_elev = elevation_range['max']
+                elev_range = max_elev - min_elev
+                print(f"Using provided elevation range: {min_elev:.2f}m to {max_elev:.2f}m")
+            else:
+                # Calculate elevation range from this data
                 min_elev = np.min(elevation_data)
                 max_elev = np.max(elevation_data)
                 elev_range = max_elev - min_elev
+            
+            if elev_range == 0:
+                print("Warning: Flat terrain detected (no elevation difference)")
+                elevation_data = elevation_data + np.random.rand(*elevation_data.shape) * 0.1
+                if elevation_range is None:
+                    min_elev = np.min(elevation_data)
+                    max_elev = np.max(elevation_data)
+                    elev_range = max_elev - min_elev
             
             print(f"Elevation range: {min_elev:.2f}m to {max_elev:.2f}m")
             print(f"Total elevation difference: {elev_range:.2f}m")
@@ -425,145 +423,11 @@ def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_nam
             if elevation_range is not None:
                 elevation_data = np.clip(elevation_data, min_elev, max_elev)
             
-            # Check if the elevation range exceeds max_height (default 4096m)
-            if elev_range > max_height:
-                print(f"Warning: Elevation range ({elev_range:.2f}m) exceeds maximum height ({max_height}m)")
-                print(f"Scaling will be applied to fit within the maximum height while preserving relative heights")
-                # Scale factor to fit within max_height while preserving relative heights
-                scale_factor = max_height / elev_range
-                print(f"Applying scale factor: {scale_factor:.4f}")
-            else:
-                # No scaling needed if within max_height - preserve original scale
-                scale_factor = 1.0
-                print(f"Using original height scale (range within {max_height}m limit)")
-            
-            # Apply vertical scaling if needed to fit within max_height
-            scaled_elev_range = elev_range * scale_factor
-            
-            # Get the bounding box for water and bathymetry data
-            bbox = calculate_bounding_box(src.bounds.bottom, src.bounds.left, width_km=32.768, height_km=32.768)
-            
-            # Create a water mask array to track water features
-            water_mask = np.zeros_like(elevation_data, dtype=bool)
-            
-            # Fetch and process water data from OSM
-            water_data_path = fetch_water_data(bbox, zoom=14, output_dir=output_dir)
-            with open(water_data_path, 'r') as f:
-                water_data = json.load(f)
-            
-            # Process water features
-            water_features = []
-            for tile_data in water_data:
-                for element in tile_data['elements']:
-                    if element['type'] == 'way' and 'geometry' in element and element.get('tags', {}).get('natural') == 'water':
-                        # Store water feature info for later processing
-                        water_features.append(element)
-                        
-                        # Mark water pixels in the mask
-                        for coord in element['geometry']:
-                            lon, lat = coord['lon'], coord['lat']
-                            try:
-                                row, col = src.index(lon, lat)
-                                if 0 <= row < elevation_data.shape[0] and 0 <= col < elevation_data.shape[1]:
-                                    water_mask[row, col] = True
-                            except Exception as e:
-                                # Skip invalid coordinates
-                                continue
-            
-            print(f"Found {len(water_features)} water features")
-            
-            # Process water areas - dilate the mask to ensure complete coverage
-            if water_features:
-                water_mask = ndimage.binary_dilation(water_mask, iterations=2)
-                
-                # Make a copy of the original elevation data before water processing
-                original_elevation = elevation_data.copy()
-                
-                # Check if we're processing Manhattan (for specialized bathymetry)
-                is_manhattan = False
-                if location_name and ('manhattan' in location_name.lower() or 'new york' in location_name.lower()):
-                    is_manhattan = True
-                    print("Manhattan area detected - will use specialized bathymetry data")
-                    
-                # Determine appropriate bathymetry sources based on location
-                if is_manhattan:
-                    bathy_sources = ['nyc_harbor', 'noaa_coastal', 'gebco']
-                else:
-                    bathy_sources = ['noaa_coastal', 'gebco']
-                    
-                # Try to fetch bathymetry data using our specialized module
-                bathymetry_data, bathy_meta = fetch_bathymetry_data(
-                    bbox, 
-                    output_dir=output_dir,
-                    sources=bathy_sources,
-                    resolution=1024,
-                    cache=True
-                )
-                
-                # Create a visualization of the bathymetry data
-                has_bathymetry = False
-                if bathymetry_data is not None:
-                    has_bathymetry = True
-                    viz_path = visualize_bathymetry(bathymetry_data, bathy_meta, output_dir)
-                    print(f"Bathymetry visualization saved to {viz_path}")
-                    
-                    # Apply bathymetry to the elevation data using our specialized function
-                    elevation_data = apply_bathymetry_to_heightmap(
-                        elevation_data,
-                        water_mask,
-                        bathymetry_data,
-                        bathy_meta,
-                        min_elev,
-                        max_depth=-30,  # Maximum water depth in meters (negative)
-                        coastal_depth=-1  # Depth at coastlines in meters (negative)
-                    )
-                else:
-                    print("No bathymetry data available, using synthetic water depths")
-                    
-                    # Apply graduated depths from shore using distance transform
-                    if np.any(water_mask):
-                        # Calculate distance from shore for each water pixel
-                        water_distance = ndimage.distance_transform_edt(water_mask)
-                        max_distance = np.max(water_distance)
-                        
-                        if max_distance > 0:
-                            # Scale distances to get depths between -1m and -20m
-                            # Smaller water bodies will have proportionally shallower depths
-                            normalized_distance = water_distance / max_distance
-                            water_depths = -1 - 19 * normalized_distance  # -1m near shore, up to -20m in center
-                            elevation_data[water_mask] = min_elev + water_depths[water_mask]
-                        else:
-                            # Fallback constant depth
-                            elevation_data[water_mask] = min_elev - 6
-            
-            # After water processing, recalculate min elevation as it may have changed
-            min_elev = np.min(elevation_data)
-            max_elev = np.max(elevation_data)
-            elev_range = max_elev - min_elev
-            
-            print(f"Updated elevation range after water processing: {min_elev:.2f}m to {max_elev:.2f}m")
-            
-            # Normalize to 0-1 range while preserving relative heights
-            # First shift to zero-base
+            # Normalize to 0-1 range using the elevation range
             normalized = (elevation_data - min_elev) / elev_range
             
-            # Apply base level and vertical scale (user adjustments)
-            normalized = (normalized * vert_scale) + base_level
-            
-            # Scale to 16-bit range using the full available range (0-65535)
-            # Calculate the optimal scaling to use maximum precision within the 16-bit range
-            if scaled_elev_range < max_height:
-                # If the scaled range is less than max_height, use the actual range for better precision
-                # This ensures we're using the full 16-bit range proportional to the actual elevation differences
-                bit_scale_factor = 65535 * (scaled_elev_range / max_height)
-                print(f"Using {bit_scale_factor:.2f} of available 16-bit range for better precision")
-            else:
-                # Otherwise use the full 16-bit range
-                bit_scale_factor = 65535
-            
-            scaled = (normalized * bit_scale_factor).astype(np.uint16)
-            
-            print(f"Final heightmap elevation range: 0 to {scaled_elev_range:.2f}m (in {bit_scale_factor:.0f} units)")
+            # Scale to 16-bit range
+            scaled = (normalized * 65535).astype(np.uint16)
             
             # Save as 16-bit PNG
             png_path = os.path.join(output_dir, f"{filename_base}.png")
@@ -573,12 +437,11 @@ def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_nam
             # Save as 16-bit TIFF
             tiff_path = os.path.join(output_dir, f"{filename_base}.tiff")
             
-            # Copy the metadata from source
             meta = src.meta.copy()
             meta.update({
                 'dtype': 'uint16',
-                'width': 4096,
-                'height': 4096,
+                'width': target_size,
+                'height': target_size,
                 'nodata': None  # We've handled no-data values
             })
             
@@ -586,67 +449,14 @@ def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_nam
                 dst.write(scaled, 1)
             print(f"Saved 16-bit TIFF heightmap to {tiff_path}")
             
-            # Generate worldmap if requested
-            worldmap_paths = None
-            if create_worldmap:
-                # Get the center coordinates of the source data
-                # This helps us calculate a larger bounding box for the worldmap
-                with rasterio.open(raw_tiff_path) as src:
-                    # Get the bounds of the image (in the CRS of the image)
-                    bounds = src.bounds
-                    # Get the transform to convert from image coordinates to CRS coordinates
-                    transform = src.transform
-                    # Calculate center point
-                    center_x = (bounds.left + bounds.right) / 2
-                    center_y = (bounds.top + bounds.bottom) / 2
-                    
-                    # For worldmap we need latitude/longitude
-                    if src.crs.to_epsg() == 4326:  # If already in WGS84
-                        center_lon, center_lat = center_x, center_y
-                    else:
-                        # We'd need to reproject to get lat/lon
-                        # For simplicity, we'll use the lat/lon from args
-                        # This would be where we'd use pyproj to transform coordinates
-                        # but for simplicity we'll extract from args later
-                        center_lat, center_lon = None, None
-                
-                worldmap_paths = generate_worldmap(scaled, meta, output_dir, center_lat, center_lon, min_elev, max_elev, filename_base)
-                if worldmap_paths:
-                    print(f"Worldmap generated successfully:")
-                    print(f"- PNG: {worldmap_paths['png']}")
-                    print(f"- TIFF: {worldmap_paths['tiff']}")
-            
-            # Generate visualization showing water features
-            viz_path = os.path.join(output_dir, f"{filename_base}_water_viz.png")
-            plt.figure(figsize=(12, 10))
-            
-            # Show the elevation with water features highlighted
-            plt.imshow(scaled, cmap='terrain', alpha=0.8)
-            
-            # Overlay water mask in blue
-            if np.any(water_mask):
-                water_overlay = np.zeros((*water_mask.shape, 4), dtype=np.float32)  # RGBA
-                water_overlay[water_mask, 2] = 1.0  # Blue channel
-                water_overlay[water_mask, 3] = 0.5  # Alpha channel
-                plt.imshow(water_overlay)
-            
-            plt.title(f"Heightmap with Water Features ({location_name})")
-            plt.colorbar(label="Elevation (16-bit scale)")
-            plt.savefig(viz_path, dpi=300)
-            plt.close()
-            
             return {
                 "png": png_path, 
                 "tiff": tiff_path, 
                 "min_elev": min_elev, 
                 "max_elev": max_elev, 
                 "range": elev_range,
-                "worldmap": worldmap_paths,
-                "location_name": location_name,
-                "scale_factor": scale_factor,
-                "scaled_range": scaled_elev_range,
-                "water_viz": viz_path,
-                "has_bathymetry": has_bathymetry
+                "worldmap": None,  # Worldmap handling is now done separately
+                "location_name": location_name
             }
     except Exception as e:
         print(f"Error processing elevation data: {str(e)}")
@@ -763,34 +573,37 @@ def generate_worldmap(base_heightmap, meta, output_dir, center_lat=None, center_
                                                   width_km=57.344, 
                                                   height_km=57.344)
             
-            # Download elevation data for the larger area
-            # Note: For the worldmap, we can use lower resolution since it's outside the playable area
-            # We'll request fewer pixels (2048x2048 instead of 4096x4096) and then upsample
-            elevation_service_url = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
+            # Check if in continental US, use USGS 3DEP service for better resolution
+            from fetch_elevation_data import is_in_continental_us
             
-            params = {
-                "bbox": f"{worldmap_bbox[0]},{worldmap_bbox[1]},{worldmap_bbox[2]},{worldmap_bbox[3]}",
-                "bboxSR": 4326,  # WGS84
-                "size": "2048,2048",  # Lower resolution for the worldmap
-                "imageSR": 4326,
-                "format": "tiff",
-                "pixelType": "F32",
-                "interpolation": "RSP_BilinearInterpolation",
-                "f": "json"
-            }
-            
-            # Get the image data info
-            response = requests.get(elevation_service_url, params=params)
-            image_info = response.json()
-            
-            if 'href' in image_info:
-                # Download the image
-                img_url = image_info['href']
-                print(f"Found direct download URL for worldmap: {img_url}")
-                img_response = requests.get(img_url)
+            if is_in_continental_us(center_lat, center_lon):
+                # USGS 3DEP service for high-resolution data
+                elevation_service_url = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
                 
-                if img_response.status_code == 200:
-                    # Create a unique filename using timestamp to avoid conflicts
+                params = {
+                    "bbox": f"{worldmap_bbox[0]},{worldmap_bbox[1]},{worldmap_bbox[2]},{worldmap_bbox[3]}",
+                    "bboxSR": 4326,  # WGS84
+                    "size": "4096,4096",  # Request full resolution for worldmap
+                    "imageSR": 4326,
+                    "format": "tiff",
+                    "pixelType": "F32",
+                    "interpolation": "RSP_BilinearInterpolation",
+                    "f": "json"
+                }
+                
+                # Get the image data info
+                response = requests.get(elevation_service_url, params=params)
+                response.raise_for_status()  # Raise an exception for error status codes
+                image_info = response.json()
+                
+                if 'href' in image_info:
+                    # Download the image
+                    img_url = image_info['href']
+                    print(f"Found direct download URL for high-resolution worldmap: {img_url}")
+                    img_response = requests.get(img_url)
+                    img_response.raise_for_status()
+                    
+                    # Create a unique filename using UUID to avoid conflicts
                     import uuid
                     unique_id = str(uuid.uuid4())[:8]
                     raw_worldmap_path = os.path.join(output_dir, f"raw_worldmap_{unique_id}.tiff")
@@ -799,48 +612,44 @@ def generate_worldmap(base_heightmap, meta, output_dir, center_lat=None, center_
                     with open(raw_worldmap_path, 'wb') as f:
                         f.write(img_response.content)
                     
-                    # Process the worldmap data in a way that ensures file handles are closed
-                    worldmap_data = None
+                    print(f"Downloaded high-resolution worldmap data to {raw_worldmap_path}")
+                    
+                    # Process the worldmap data
                     with rasterio.open(raw_worldmap_path) as src:
-                        worldmap_data = src.read(1).copy()  # Make a copy to ensure we're not holding the file
-                        
-                        # Get no-data value before closing
+                        worldmap_data = src.read(1).copy()
                         no_data = src.nodata
                     
-                    # Now that the file is closed, process the data
-                    if worldmap_data is not None:
-                        # Handle no-data values
-                        if no_data is not None:
-                            mask = worldmap_data == no_data
-                            if mask.any():
-                                print(f"Interpolating {mask.sum()} no-data pixels in worldmap...")
-                                worldmap_data = interpolate_nodata(worldmap_data, mask)
-                        
-                        # Handle NaN or inf values
-                        if np.isnan(worldmap_data).any() or np.isinf(worldmap_data).any():
-                            mask = np.logical_or(np.isnan(worldmap_data), np.isinf(worldmap_data))
+                    # Handle no-data values
+                    if no_data is not None:
+                        mask = worldmap_data == no_data
+                        if mask.any():
+                            print(f"Interpolating {mask.sum()} no-data pixels in worldmap...")
                             worldmap_data = interpolate_nodata(worldmap_data, mask)
-                        
-                        # Upsample from 2048x2048 to 4096x4096
-                        print("Upsampling worldmap data to full resolution...")
-                        worldmap_data = ndimage.zoom(worldmap_data, 2, order=1)
-                        
-                        # Normalize the worldmap data using the same elevation range as the base heightmap
-                        # This ensures consistent height representation between the two maps
-                        if min_elev is not None and max_elev is not None:
-                            # Clip the worldmap data to the same min/max as the base heightmap
-                            # to ensure consistent scaling
-                            worldmap_data = np.clip(worldmap_data, min_elev, max_elev)
-                            worldmap_normalized = (worldmap_data - min_elev) / (max_elev - min_elev)
-                        else:
-                            # If we don't have the base heightmap range, normalize based on this data
-                            wm_min = np.min(worldmap_data)
-                            wm_max = np.max(worldmap_data)
-                            worldmap_normalized = (worldmap_data - wm_min) / (wm_max - wm_min)
-                        
-                        # Scale to 16-bit
-                        worldmap = (worldmap_normalized * 65535).astype(np.uint16)
-                        print("Successfully downloaded and processed real elevation data for worldmap")
+                    
+                    # Handle NaN or inf values
+                    if np.isnan(worldmap_data).any() or np.isinf(worldmap_data).any():
+                        mask = np.logical_or(np.isnan(worldmap_data), np.isinf(worldmap_data))
+                        worldmap_data = interpolate_nodata(worldmap_data, mask)
+                    
+                    # Normalize the worldmap data using the same elevation range as the base heightmap
+                    if min_elev is not None and max_elev is not None:
+                        # Clip the worldmap data to the same min/max as the base heightmap
+                        worldmap_data = np.clip(worldmap_data, min_elev, max_elev)
+                        worldmap_normalized = (worldmap_data - min_elev) / (max_elev - min_elev)
+                    else:
+                        # If we don't have the base heightmap range, normalize based on this data
+                        wm_min = np.min(worldmap_data)
+                        wm_max = np.max(worldmap_data)
+                        worldmap_normalized = (worldmap_data - wm_min) / (wm_max - wm_min)
+                    
+                    # Scale to 16-bit
+                    worldmap = (worldmap_normalized * 65535).astype(np.uint16)
+                    print("Successfully downloaded and processed real elevation data for worldmap")
+            else:
+                # For locations outside continental US, use a different approach
+                # ...existing code for non-US locations...
+                pass
+                
         except Exception as e:
             print(f"Error downloading worldmap data: {str(e)}")
             print("Falling back to procedural generation for worldmap")
@@ -973,51 +782,36 @@ def visualize_heightmaps(heightmap_info, center_lat, center_lon, output_dir="ele
     location_name = heightmap_info.get('location_name', '')
     location_title = f' ({location_name})' if location_name else ''
     
-    # Plot the base heightmap
+    # Plot the base heightmap (14.336 x 14.336 km area)
     im1 = ax1.imshow(base_heightmap, cmap='terrain')
-    ax1.set_title(f'Base Heightmap{location_title}\nCentered at {center_lat}, {center_lon}')
+    ax1.set_title(f'Core Heightmap{location_title}\n14.336 x 14.336 km area\nCentered at {center_lat}, {center_lon}')
     ax1.grid(alpha=0.3)
     plt.colorbar(im1, ax=ax1, label='Elevation (scaled to 16-bit)')
     
-    # Load and plot worldmap if available
+    # Load and plot worldmap if available (57.344 x 57.344 km area)
     if heightmap_info['worldmap']:
         worldmap = np.array(Image.open(heightmap_info['worldmap']['png']))
         im2 = ax2.imshow(worldmap, cmap='terrain')
-        ax2.set_title(f'Extended Worldmap{location_title}\n(4x larger area)')
+        ax2.set_title(f'Extended Worldmap{location_title}\n57.344 x 57.344 km area')
         ax2.grid(alpha=0.3)
         plt.colorbar(im2, ax=ax2, label='Elevation (scaled to 16-bit)')
         
-        # Draw a box showing the playable area in the worldmap
-        # The playable area is the central 1024x1024 region of the worldmap (not the full worldmap)
+        # Draw a box showing where the core heightmap area is within the worldmap
+        # Core heightmap is 14.336 x 14.336 km, while worldmap is 57.344 x 57.344 km
+        # So the ratio is 14.336/57.344 = 0.25 (approximately)
         h, w = worldmap.shape
         center_h, center_w = h//2, w//2
-        box_size = 1024
-        half_box = box_size // 2
+        heightmap_box_size = int(w * (14.336/57.344))  # This should be roughly 1024 pixels
+        half_box = heightmap_box_size // 2
         rect = plt.Rectangle((center_w - half_box, center_h - half_box), 
-                             box_size, box_size, 
-                             linewidth=2, edgecolor='r', facecolor='none')
+                           heightmap_box_size, heightmap_box_size, 
+                           linewidth=2, edgecolor='r', facecolor='none')
         ax2.add_patch(rect)
-        ax2.text(center_w, center_h - half_box - 30, "Playable Area", 
-                 color='r', ha='center', va='bottom', fontsize=12)
-        
-        # Also draw a box in the base heightmap to highlight that it corresponds
-        # to a larger area than just the playable region
-        # According to Heightmaps.md, the worldmap (4096x4096) covers a larger area 
-        # than the playable area (which is 1024x1024 pixels in the worldmap)
-        # The playable area is actually 14336x14336 meters, which is  of the 57344x57344 meter worldmap heightmap
-        playable_pixels = int(4096 * (14336 / 32768))  # Scale to find how many pixels represent the playable area
-        h_base, w_base = base_heightmap.shape
-        center_h_base, center_w_base = h_base//2, w_base//2
-        half_playable = playable_pixels // 2
-        rect_base = plt.Rectangle((center_w_base - half_playable, center_h_base - half_playable), 
-                                 playable_pixels, playable_pixels, 
-                                 linewidth=2, edgecolor='r', facecolor='none')
-        ax1.add_patch(rect_base)
-        ax1.text(center_w_base, center_h_base - half_playable - 30, "Playable Area", 
-                 color='r', ha='center', va='bottom', fontsize=12)
+        ax2.text(center_w, center_h - half_box - 30, "Core Heightmap Area (14.336 x 14.336 km)", 
+                color='r', ha='center', va='bottom', fontsize=10)
     else:
         ax2.text(0.5, 0.5, "Worldmap not generated", 
-                 ha='center', va='center', fontsize=16)
+                ha='center', va='center', fontsize=16)
         ax2.set_axis_off()
     
     plt.tight_layout()
@@ -1031,8 +825,8 @@ def visualize_heightmaps(heightmap_info, center_lat, center_lon, output_dir="ele
     print(f"Visualization saved to {viz_path}")
     print("\nHeightmaps are ready for use in Cities: Skylines II")
     print("Remember: Each pixel represents 8x8 meters")
-    print("- Base heightmap covers 32.768 x 32.768 km")
-    print("- Worldmap shows a larger area with the central 8.192 x 8.192 km (1024x1024) matching the playable area")
+    print("- Core heightmap covers 14.336 x 14.336 km (high detail area)")
+    print("- Worldmap covers 57.344 x 57.344 km (showing surrounding context)")
 
 # Replace the old visualize_heightmap function with the new one
 visualize_heightmap = visualize_heightmaps
@@ -1057,9 +851,16 @@ def main():
     
     # Print intro
     print("="*80)
-    print("Cities Skylines 2 Heightmap Generator")
+    print("Cities Skylines 2 Heightmap Generator (Continental US Only)")
     print("="*80)
     print(f"Generating heightmap for location: {args.lat, args.lon}")
+    
+    # Check if coordinates are within continental US
+    from fetch_elevation_data import is_in_continental_us
+    if not is_in_continental_us(args.lat, args.lon):
+        print(f"Error: Coordinates ({args.lat}, {args.lon}) are outside the continental United States.")
+        print("This tool is limited to continental US locations only.")
+        return
     
     # Create output directory
     os.makedirs(args.output, exist_ok=True)
