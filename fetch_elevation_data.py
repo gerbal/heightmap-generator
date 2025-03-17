@@ -283,7 +283,7 @@ def parse_elevation_data(data):
     Parse the downloaded elevation data.
     
     Args:
-        data (dict): Data from fetch_elevation_data()
+        data (dict or str): Data from fetch_elevation_data() or direct file path
         
     Returns:
         array: Numpy array of elevation values
@@ -292,7 +292,10 @@ def parse_elevation_data(data):
         import rasterio
         from scipy import ndimage
         
-        with rasterio.open(data['data_path']) as src:
+        # Handle both dictionary input and direct file path
+        file_path = data['data_path'] if isinstance(data, dict) else data
+        
+        with rasterio.open(file_path) as src:
             elevation_array = src.read(1)
             
             # Handle no-data values

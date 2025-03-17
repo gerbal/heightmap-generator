@@ -8,6 +8,7 @@ This tool generates heightmaps compatible with Cities Skylines 2 using high-reso
 - Automatic download of highest resolution available USGS 3DEP data (up to 1-meter resolution where available)
 - Creates 16-bit PNG and TIFF heightmaps at optimal resolution
 - Generates both detailed core heightmap (14.336 x 14.336 km) and extended worldmap (57.344 x 57.344 km)
+- **NEW:** Optional topobathymetry data integration for realistic underwater terrain
 - Ensures consistent elevation scaling between core area and worldmap
 - Handles no-data values and seamlessly fills gaps
 - Includes visualization of the generated heightmaps with area indicators
@@ -41,6 +42,27 @@ or
 python main.py "35.7648,-82.2652"
 ```
 
+### With Bathymetry Data (for coastal or lake areas)
+
+To add realistic underwater terrain for water bodies:
+
+```bash
+python main.py "New York" --with-bathymetry
+```
+
+You can also specify the bathymetry data source:
+
+```bash
+python main.py "San Francisco" --with-bathymetry --bathymetry-source gebco
+```
+
+Available bathymetry sources:
+- `noaa_dem` (default) - NOAA Digital Elevation Model (highest resolution)
+- `noaa_coastal` - NOAA Coastal Relief Model
+- `noaa_ninth_arc` - NOAA 9th Arc-Second Topobathy (3m resolution, limited coverage)
+- `gebco` - Global Bathymetry data (global coverage, lower resolution)
+- `noaa_crm` - NOAA Coastal Relief Model via ArcGIS
+
 ### Using heightmap_generator.py (Advanced)
 
 For more control over the generation process:
@@ -68,7 +90,10 @@ The generator creates:
 2. Extended worldmap (4096x4096) covering 57.344 x 57.344 km area
    - 16-bit PNG (game format)
    - 16-bit TIFF (for GIS applications)
-3. Visualization image showing both maps with area indicators
+3. When using bathymetry:
+   - Additional heightmaps with topobathymetry integration
+   - Bathymetry visualization showing underwater terrain details
+4. Visualization image showing all maps with area indicators
 
 ## Technical Details
 
@@ -76,13 +101,15 @@ The generator creates:
 - **Game playable area**: Matches the core heightmap area
 - **Extended worldmap**: 4096×4096 pixels covering 57.344×57.344 km
 - **Format**: 16-bit grayscale PNG/TIFF
-- **Data source**: USGS 3DEP (3D Elevation Program)
+- **Data sources**: 
+  - Topography: USGS 3DEP (3D Elevation Program)
+  - Bathymetry: NOAA Digital Elevation Models, GEBCO Global Bathymetry
 - **Resolution**: Up to 1-meter where available, minimum 10-meter nationwide
 
 ## Requirements
 
 - Python 3.7+
-- Internet connection for downloading USGS elevation data
+- Internet connection for downloading elevation and bathymetry data
 - Dependencies:
   - requests
   - numpy
@@ -109,11 +136,19 @@ The generator creates:
    python main.py "36.0544,-112.1401"
    ```
 
+4. Generate a heightmap with bathymetry for coastal cities:
+   ```bash
+   python main.py "Seattle" --with-bathymetry
+   python main.py "New York" --with-bathymetry
+   python main.py "San Francisco" --with-bathymetry --bathymetry-source gebco
+   ```
+
 ## Importing into Cities Skylines 2
 
 1. Place the generated `.png` files in your game's heightmap folder:
    - Core heightmap: `<location_name>.png`
    - Worldmap: `<location_name>_worldmap.png`
+   - With bathymetry: `<location_name>_topo_<source>.png`
    
    The default location is: `C:\Users\<username>\AppData\LocalLow\Colossal Order\Cities Skylines II\Maps`
 
@@ -125,3 +160,89 @@ The generator creates:
 - Currently only supports locations within the continental United States
 - Elevation data quality varies by region (best in urban and high-interest areas)
 - Maximum resolution depends on available USGS 3DEP data for the area
+- Bathymetry data coverage and quality varies, with best results in coastal areas and major water bodies
+
+## Troubleshooting
+
+### Data Download Issues
+
+1. **Corrupted TIFF Files**
+   - If you see errors like `TIFFReadEncodedTile() failed` or `Read failed`, the downloaded TIFF file may be corrupted
+   - This can happen due to:
+     - Network interruptions during download
+     - Server timeout issues
+     - Insufficient disk space
+   - Solutions:
+     - Try running the script again (it will download fresh data)
+     - Check your internet connection
+     - Ensure you have enough free disk space (at least 500MB recommended)
+
+2. **USGS 3DEP or NOAA Service Issues**
+   - The elevation services may occasionally be unavailable or slow
+   - Common errors:
+     - HTTP timeout errors
+     - Invalid JSON responses
+     - Incomplete data downloads
+   - Solutions:
+     - Wait a few minutes and try again
+     - Try during off-peak hours (US daytime can be busier)
+     - Check [USGS Status Page](https://status.usgs.gov) or [NOAA Status](https://status.noaa.gov) for service updates
+
+### Processing Issues
+
+1. **Memory Errors**
+   - Processing large elevation datasets requires significant RAM
+   - Recommended: 8GB RAM minimum, 16GB+ for optimal performance
+   - If you see memory errors:
+     - Close other memory-intensive applications
+     - Try a smaller area first
+     - Consider upgrading your RAM if issues persist
+
+2. **Resolution and File Size**
+   - High-resolution data (1m) can result in very large files
+   - Each heightmap is 4096x4096 pixels (32MB for 16-bit)
+   - Worldmaps cover 4x larger area
+   - If file sizes are an issue:
+     - Ensure sufficient disk space
+     - Consider using lower resolution data
+     - Clean up temporary files regularly
+
+### Bathymetry Issues
+
+1. **No Bathymetry Data Available**
+   - Some inland areas may have limited or no bathymetry data
+   - NOAA data primarily covers coastal areas and major lakes
+   - If bathymetry fails, the tool will continue without it
+   - Try using a different bathymetry source with `--bathymetry-source` option
+
+2. **Unrealistic Underwater Terrain**
+   - Bathymetry data quality and resolution varies significantly
+   - Small water bodies may have simplified or synthetic depths
+   - If underwater terrain looks unrealistic:
+     - Try a different bathymetry source
+     - Shift your location slightly closer to deeper water
+
+### Known Limitations
+
+1. **Maximum Height Handling**
+   - CS2 has a maximum height limit of 4096 meters
+   - Areas exceeding this will be clipped
+   - Very high elevation ranges may lose detail in lower areas
+   - Consider using custom scaling for extreme terrain
+
+2. **No-Data Areas**
+   - Some regions may have gaps in elevation data
+   - The tool attempts to interpolate these areas
+   - Large no-data regions may result in flat or unrealistic terrain
+   - Try shifting the area slightly if this occurs
+
+### Getting Help
+
+If you encounter issues not covered here:
+1. Check the full error message for specific details
+2. Look for similar issues in the project's issue tracker
+3. When reporting issues, include:
+   - Full error message
+   - Location coordinates
+   - Operating system and Python version
+   - Screenshots of any visual artifacts

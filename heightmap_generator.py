@@ -504,10 +504,96 @@ def sanitize_filename(name):
     name = name.strip()[:50]
     return name
 
-def process_heightmap(raw_tiff_path, output_dir="elevation_output", location_name=None, elevation_range=None, max_height=4096, create_worldmap=True):
-    """Process the raw elevation data with enhanced error handling and retry logic"""
-    if not raw_tiff_path or not os.path.exists(raw_tiff_path):
-        print("No raw data to process!")
+def process_heightmap(raw_tiff_path=None, output_dir="elevation_output", location_name=None, elevation_range=None, max_height=4096, create_worldmap=True, provided_data=None):
+    """
+    Process the raw elevation data with enhanced error handling and retry logic.
+    
+    Args:
+        raw_tiff_path (str): Path to the raw elevation data (or None if using provided_data)
+        output_dir (str): Directory to save the output files
+        location_name (str): Name of the location (used for filenames)
+        elevation_range (dict): Optional dict with 'min' and 'max' elevation values
+        max_height (int): Maximum height in meters
+        create_worldmap (bool): Whether to create a worldmap
+        provided_data (numpy.ndarray): Optional array with elevation data (used instead of raw_tiff_path)
+        
+    Returns:
+        dict: Information about the processed heightmap
+    """
+    if not raw_tiff_path and provided_data is None:
+        print("No data to process! Please provide either a file path or data array.")
+        return None
+    
+    # If we have provided data, use it directly
+    if provided_data is not None:
+        elevation_data = provided_data
+        meta = {
+            'dtype': 'float32',
+            'width': elevation_data.shape[1],
+            'height': elevation_data.shape[0],
+            'nodata': None,
+            'crs': 'EPSG:4326',
+        }
+        print("\nUsing provided elevation data...")
+        
+        if location_name:
+            filename_base = sanitize_filename(location_name)
+        else:
+            filename_base = "heightmap"
+        
+        print("\nProcessing elevation data...")
+        
+        if elevation_range is not None:
+            min_elev = elevation_range['min']
+            max_elev = elevation_range['max']
+        else:
+            min_elev = np.min(elevation_data)
+            max_elev = np.min([np.max(elevation_data), 4096])
+        
+        print(f"Elevation range: {min_elev:.2f}m to {max_elev:.2f}m")
+        if np.max(elevation_data) > 4096:
+            print("Note: Values above 4096m will be clipped")
+        
+        # Scale to 16-bit range (16 grayscale levels per meter)
+        GRAYSCALE_PER_METER = 65536 / 4096
+        elevation_data_clipped = np.clip(elevation_data, min_elev, 4096)
+        scaled = ((elevation_data_clipped - min_elev) * GRAYSCALE_PER_METER).astype(np.uint16)
+        scaled = np.clip(scaled, 0, 65535)
+        
+        # Save outputs
+        print("\nSaving files...")
+        png_path = os.path.join(output_dir, f"{filename_base}.png")
+        Image.fromarray(scaled).save(png_path)
+        
+        tiff_path = os.path.join(output_dir, f"{filename_base}.tiff")
+        
+        with rasterio.open(
+            tiff_path, 
+            'w',
+            driver='GTiff',
+            height=scaled.shape[0],
+            width=scaled.shape[1],
+            count=1,
+            dtype='uint16',
+            crs='EPSG:4326',
+            nodata=None
+        ) as dst:
+            dst.write(scaled, 1)
+        
+        # Return output info
+        return {
+            "png": png_path, 
+            "tiff": tiff_path, 
+            "min_elev": min_elev, 
+            "max_elev": max_elev, 
+            "range": max_elev - min_elev,
+            "worldmap": None,
+            "location_name": location_name
+        }
+    
+    # If we're using a file path, read from it
+    if not os.path.exists(raw_tiff_path):
+        print("Raw data file does not exist!")
         return None
     
     max_retries = 3
@@ -1076,15 +1162,29 @@ def visualize_heightmaps(heightmap_info, center_lat, center_lon, output_dir="ele
         center_lon (float): Center longitude
         output_dir (str): Directory to save visualizations
     """
-    # Create a figure with two subplots side by side
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
-    
-    # Load the base heightmap
-    base_heightmap = np.array(Image.open(heightmap_info['png']))
-    
     # Get the location name for the title
     location_name = heightmap_info.get('location_name', '')
     location_title = f' ({location_name})' if location_name else ''
+    
+    # Check if we have a standard heightmap and a version with bathymetry
+    has_bathymetry = 'with_bathymetry' in heightmap_info
+    has_worldmap = 'worldmap' in heightmap_info and heightmap_info['worldmap']
+    has_worldmap_bathy = has_bathymetry and 'worldmap_with_bathymetry' in heightmap_info
+    
+    # Determine figure layout based on available data
+    if has_bathymetry:
+        if has_worldmap_bathy:
+            # 2x2 grid: standard and bathy versions of both heightmap and worldmap
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
+        else:
+            # 2x2 grid with empty spot for worldmap with bathymetry
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
+    else:
+        # Original layout: just standard heightmap and worldmap
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # Load the base heightmap
+    base_heightmap = np.array(Image.open(heightmap_info['png']))
     
     # Plot the base heightmap (14.336 x 14.336 km area)
     im1 = ax1.imshow(base_heightmap, cmap='terrain')
@@ -1093,7 +1193,7 @@ def visualize_heightmaps(heightmap_info, center_lat, center_lon, output_dir="ele
     plt.colorbar(im1, ax=ax1, label='Elevation (scaled to 16-bit)')
     
     # Load and plot worldmap if available (57.344 x 57.344 km area)
-    if heightmap_info['worldmap']:
+    if has_worldmap:
         worldmap = np.array(Image.open(heightmap_info['worldmap']['png']))
         im2 = ax2.imshow(worldmap, cmap='terrain')
         ax2.set_title(f'Extended Worldmap{location_title}\n57.344 x 57.344 km area')
@@ -1118,6 +1218,63 @@ def visualize_heightmaps(heightmap_info, center_lat, center_lon, output_dir="ele
                 ha='center', va='center', fontsize=16)
         ax2.set_axis_off()
     
+    # If we have bathymetry data, show the heightmap with bathymetry
+    if has_bathymetry:
+        bathy_heightmap = np.array(Image.open(heightmap_info['with_bathymetry']['png']))
+        
+        # Create a custom colormap for topobathymetry:
+        # - Land areas (higher elevations): terrain colors (greens, browns)
+        # - Water areas (below sea level): blues
+        from matplotlib.colors import LinearSegmentedColormap
+        
+        # Get a colormap for bathymetry (blues)
+        cmap_water = plt.cm.get_cmap('Blues_r')
+        # Get a colormap for terrain (terrain)
+        cmap_terrain = plt.cm.get_cmap('terrain')
+        
+        # Create a custom colormap that transitions between them
+        colors_water = cmap_water(np.linspace(0.3, 1, 128))  # Use only part of the blue range
+        colors_terrain = cmap_terrain(np.linspace(0, 1, 128))
+        combined_colors = np.vstack((colors_water, colors_terrain))
+        topo_bathy_cmap = LinearSegmentedColormap.from_list('topo_bathy', combined_colors)
+        
+        im3 = ax3.imshow(bathy_heightmap, cmap=topo_bathy_cmap)
+        ax3.set_title(f'Core Heightmap with Bathymetry{location_title}\n14.336 x 14.336 km area')
+        ax3.grid(alpha=0.3)
+        plt.colorbar(im3, ax=ax3, label='Elevation with Bathymetry (scaled to 16-bit)')
+        
+        # Show bathymetry visualization if available
+        if 'bathymetry_viz' in heightmap_info:
+            # Just add text about the bathymetry visualization
+            ax3.text(0.5, 0.03, f"Bathymetry visualization available at:\n{os.path.basename(heightmap_info['bathymetry_viz'])}",
+                     transform=ax3.transAxes, ha='center', va='bottom', 
+                     bbox=dict(facecolor='white', alpha=0.7), fontsize=8)
+        
+        # Show worldmap with bathymetry if available
+        if has_worldmap_bathy:
+            worldmap_bathy = np.array(Image.open(heightmap_info['worldmap_with_bathymetry']['png']))
+            im4 = ax4.imshow(worldmap_bathy, cmap=topo_bathy_cmap)
+            ax4.set_title(f'Extended Worldmap with Bathymetry{location_title}\n57.344 x 57.344 km area')
+            ax4.grid(alpha=0.3)
+            plt.colorbar(im4, ax=ax4, label='Elevation with Bathymetry (scaled to 16-bit)')
+            
+            # Draw a box showing where the core heightmap area is within the worldmap
+            h, w = worldmap_bathy.shape
+            center_h, center_w = h//2, w//2
+            heightmap_box_size = int(w * (14.336/57.344))  # This should be roughly 1024 pixels
+            half_box = heightmap_box_size // 2
+            rect = plt.Rectangle((center_w - half_box, center_h - half_box), 
+                               heightmap_box_size, heightmap_box_size, 
+                               linewidth=2, edgecolor='r', facecolor='none')
+            ax4.add_patch(rect)
+            ax4.text(center_w, center_h - half_box - 30, "Core Heightmap Area (14.336 x 14.336 km)", 
+                    color='r', ha='center', va='bottom', fontsize=10)
+        else:
+            if 'ax4' in locals():
+                ax4.text(0.5, 0.5, "Worldmap with Bathymetry not generated", 
+                        ha='center', va='center', fontsize=16)
+                ax4.set_axis_off()
+    
     plt.tight_layout()
     
     # Save the visualization
@@ -1131,6 +1288,15 @@ def visualize_heightmaps(heightmap_info, center_lat, center_lon, output_dir="ele
     print("Remember: Each pixel represents 8x8 meters")
     print("- Core heightmap covers 14.336 x 14.336 km (high detail area)")
     print("- Worldmap covers 57.344 x 57.344 km (showing surrounding context)")
+    
+    # Print additional info about bathymetry if available
+    if has_bathymetry:
+        print("\nBathymetry versions:")
+        print(f"- Core Heightmap with Bathymetry: {os.path.basename(heightmap_info['with_bathymetry']['png'])}")
+        if has_worldmap_bathy:
+            print(f"- Worldmap with Bathymetry: {os.path.basename(heightmap_info['worldmap_with_bathymetry']['png'])}")
+        if 'bathymetry_viz' in heightmap_info:
+            print(f"- Bathymetry Visualization: {os.path.basename(heightmap_info['bathymetry_viz'])}")
 
 # Replace the old visualize_heightmap function with the new one
 visualize_heightmap = visualize_heightmaps

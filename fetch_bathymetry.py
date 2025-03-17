@@ -868,9 +868,9 @@ def visualize_bathymetry(bathymetry_data, metadata, output_dir="elevation_output
     
     plt.title(title)
     
-    # Add spatial reference (fix the syntax error)
+    # Add spatial reference (fix the syntax error with double colon)
     plt.xlabel(f"Longitude: {bbox[0]:.4f} to {bbox[2]:.4f}")
-    plt.ylabel(f"Latitude: {bbox[1]::.4f} to {bbox[3]:.4f}")
+    plt.ylabel(f"Latitude: {bbox[1]:.4f} to {bbox[3]:.4f}")
     
     # Save the visualization
     plt.tight_layout()
