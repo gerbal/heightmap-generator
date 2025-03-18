@@ -521,338 +521,145 @@ def process_heightmap(raw_tiff_path=None, output_dir="elevation_output", locatio
         dict: Information about the processed heightmap
     """
     if not raw_tiff_path and provided_data is None:
-        print("No data to process! Please provide either a file path or data array.")
+        print("Error: Either raw_tiff_path or provided_data must be provided")
         return None
     
     # If we have provided data, use it directly
     if provided_data is not None:
-        elevation_data = provided_data
+        elevation_array = provided_data
+        # For direct data input, we need to create a meta dict
         meta = {
-            'dtype': 'float32',
-            'width': elevation_data.shape[1],
-            'height': elevation_data.shape[0],
-            'nodata': None,
-            'crs': 'EPSG:4326',
+            'driver': 'GTiff',
+            'height': elevation_array.shape[0],
+            'width': elevation_array.shape[1],
+            'count': 1,
+            'dtype': elevation_array.dtype,
+            'crs': '+proj=latlong',
         }
-        print("\nUsing provided elevation data...")
-        
-        if location_name:
-            filename_base = sanitize_filename(location_name)
-        else:
-            filename_base = "heightmap"
-        
-        print("\nProcessing elevation data...")
-        
-        if elevation_range is not None:
-            min_elev = elevation_range['min']
-            max_elev = elevation_range['max']
-        else:
-            min_elev = np.min(elevation_data)
-            max_elev = np.min([np.max(elevation_data), 4096])
-        
-        print(f"Elevation range: {min_elev:.2f}m to {max_elev:.2f}m")
-        if np.max(elevation_data) > 4096:
-            print("Note: Values above 4096m will be clipped")
-        
-        # Scale to 16-bit range (16 grayscale levels per meter)
-        GRAYSCALE_PER_METER = 65536 / 4096
-        elevation_data_clipped = np.clip(elevation_data, min_elev, 4096)
-        scaled = ((elevation_data_clipped - min_elev) * GRAYSCALE_PER_METER).astype(np.uint16)
-        scaled = np.clip(scaled, 0, 65535)
-        
-        # Save outputs
-        print("\nSaving files...")
-        png_path = os.path.join(output_dir, f"{filename_base}.png")
-        Image.fromarray(scaled).save(png_path)
-        
-        tiff_path = os.path.join(output_dir, f"{filename_base}.tiff")
-        
-        with rasterio.open(
-            tiff_path, 
-            'w',
-            driver='GTiff',
-            height=scaled.shape[0],
-            width=scaled.shape[1],
-            count=1,
-            dtype='uint16',
-            crs='EPSG:4326',
-            nodata=None
-        ) as dst:
-            dst.write(scaled, 1)
-        
-        # Return output info
-        return {
-            "png": png_path, 
-            "tiff": tiff_path, 
-            "min_elev": min_elev, 
-            "max_elev": max_elev, 
-            "range": max_elev - min_elev,
-            "worldmap": None,
-            "location_name": location_name
-        }
+    else:
+        # If we're using a file path, read from it
+        if not os.path.exists(raw_tiff_path):
+            print(f"Error: File not found: {raw_tiff_path}")
+            return None
     
-    # If we're using a file path, read from it
-    if not os.path.exists(raw_tiff_path):
-        print("Raw data file does not exist!")
-        return None
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if location_name:
-                filename_base = sanitize_filename(location_name)
-            else:
-                filename_base = "heightmap"
-            
-            with rasterio.Env():
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                print(f"\nReading elevation data...")
+                
+                # Use rasterio to read the data
                 with rasterio.open(raw_tiff_path) as src:
-                    print("\nReading elevation data...")
+                    elevation_array = src.read(1)
+                    meta = src.meta
                     
-                    try:
-                        elevation_data = src.read(1)
-                    except Exception as e:
-                        print("Using block-by-block reading mode...")
-                        
-                        block_shapes = src.block_shapes
-                        if not block_shapes:
-                            raise ValueError("Could not determine block/tile size")
-                        
-                        block_height, block_width = block_shapes[0]
-                        n_blocks_y = (src.height + block_height - 1) // block_height
-                        n_blocks_x = (src.width + block_width - 1) // block_width
-                        
-                        elevation_data = np.zeros((src.height, src.width), dtype=src.dtypes[0])
-                        total_blocks = n_blocks_y * n_blocks_x
-                        current_block = 0
-                        failed_blocks = []
-                        
-                        print(f"Total blocks to process: {total_blocks}")
-                        progress_interval = max(1, total_blocks // 10)  # Show progress every 10%
-                        
-                        def read_block_with_retry(src, block_x, block_y, block_width, block_height, max_retries=3):
-                            """Try to read a block with multiple retries and different strategies"""
-                            original_width = block_width
-                            original_height = block_height
-                            
-                            # Try progressively smaller block sizes
-                            for size_reduction in range(3):  # Try full size, half size, quarter size
-                                current_width = original_width // (2 ** size_reduction)
-                                current_height = original_height // (2 ** size_reduction)
-                                
-                                # Skip if block becomes too small
-                                if current_width < 32 or current_height < 32:
-                                    continue
-                                    
-                                try:
-                                    # Calculate sub-blocks needed for this size
-                                    for sub_y in range(0, original_height, current_height):
-                                        for sub_x in range(0, original_width, current_width):
-                                            sub_height = min(current_height, original_height - sub_y)
-                                            sub_width = min(current_width, original_width - sub_x)
-                                            
-                                            window = rasterio.windows.Window(
-                                                block_x * original_width + sub_x,
-                                                block_y * original_height + sub_y,
-                                                sub_width,
-                                                sub_height
-                                            )
-                                            
-                                            data = src.read(1, window=window)
-                                            if data is None or data.size == 0:
-                                                raise ValueError("Empty data read")
-                                            
-                                            return data
-                                            
-                                except Exception as e:
-                                    if size_reduction == 2:  # Last attempt, try pixel by pixel
-                                        try:
-                                            data = np.zeros((original_height, original_width), dtype=src.dtypes[0])
-                                            for y in range(original_height):
-                                                for x in range(original_width):
-                                                    try:
-                                                        window = rasterio.windows.Window(
-                                                            block_x * original_width + x,
-                                                            block_y * original_height + y,
-                                                            1, 1
-                                                        )
-                                                        pixel = src.read(1, window=window)
-                                                        if pixel is not None and pixel.size > 0:
-                                                            data[y, x] = pixel[0, 0]
-                                                    except:
-                                                        continue
-                                            return data
-                                        except:
-                                            return None
-                                    continue
-                            
-                            return None
-                        
-                        for block_y in range(n_blocks_y):
-                            for block_x in range(n_blocks_x):
-                                try:
-                                    block_data = read_block_with_retry(
-                                        src, block_x, block_y, 
-                                        block_width, block_height
-                                    )
-                                    
-                                    if block_data is not None:
-                                        # Calculate actual window coordinates
-                                        window = rasterio.windows.Window(
-                                            block_x * block_width,
-                                            block_y * block_height,
-                                            min(block_width, src.width - block_x * block_width),
-                                            min(block_height, src.height - block_y * block_height)
-                                        )
-                                        
-                                        elevation_data[
-                                            window.row_off:window.row_off + window.height,
-                                            window.col_off:window.col_off + window.width
-                                        ] = block_data
-                                    else:
-                                        # If block read completely failed, mark for interpolation
-                                        failed_blocks.append((block_x, block_y))
-                                    
-                                    current_block += 1
-                                    if current_block % progress_interval == 0:
-                                        print(f"Progress: {current_block}/{total_blocks} blocks processed ({(current_block/total_blocks)*100:.1f}%)")
-                                        
-                                except Exception as e:
-                                    print(f"Error reading block at ({block_x}, {block_y}): {str(e)}")
-                                    failed_blocks.append((block_x, block_y))
-                                    continue
-                        
-                        # Handle failed blocks using interpolation from neighbors
-                        if failed_blocks:
-                            print(f"Attempting to recover {len(failed_blocks)} failed blocks using interpolation...")
-                            
-                            # Create a mask of valid data
-                            valid_mask = elevation_data != 0
-                            
-                            # If we have enough valid data, use it for interpolation
-                            if np.sum(valid_mask) > (valid_mask.size * 0.5):  # At least 50% valid data
-                                print("Using spatial interpolation for failed blocks...")
-                                # Create coordinate grids
-                                y, x = np.mgrid[0:src.height, 0:src.width]
-                                
-                                # Get valid points and their values
-                                valid_points = np.column_stack((y[valid_mask], x[valid_mask]))
-                                valid_values = elevation_data[valid_mask]
-                                
-                                # Interpolate failed regions
-                                from scipy.interpolate import LinearNDInterpolator
-                                interpolator = LinearNDInterpolator(valid_points, valid_values, fill_value=np.mean(valid_values))
-                                
-                                for block_x, block_y in failed_blocks:
-                                    window = rasterio.windows.Window(
-                                        block_x * block_width,
-                                        block_y * block_height,
-                                        min(block_width, src.width - block_x * block_width),
-                                        min(block_height, src.height - block_y * block_height)
-                                    )
-                                    
-                                    # Create coordinate grid for this block
-                                    block_y_coords = np.arange(window.row_off, window.row_off + window.height)
-                                    block_x_coords = np.arange(window.col_off, window.col_off + window.width)
-                                    block_coords = np.meshgrid(block_y_coords, block_x_coords, indexing='ij')
-                                    points = np.column_stack((block_coords[0].ravel(), block_coords[1].ravel()))
-                                    
-                                    # Interpolate values for this block
-                                    interpolated_values = interpolator(points)
-                                    interpolated_block = interpolated_values.reshape((window.height, window.width))
-                                    
-                                    elevation_data[
-                                        window.row_off:window.row_off + window.height,
-                                        window.col_off:window.col_off + window.width
-                                    ] = interpolated_block
-                            else:
-                                print("Not enough valid data for interpolation. Using statistical approach...")
-                                # Use statistical approach when we don't have enough valid data
-                                valid_data = elevation_data[valid_mask]
-                                mean_height = np.mean(valid_data)
-                                std_height = np.std(valid_data)
-                                
-                                for block_x, block_y in failed_blocks:
-                                    window = rasterio.windows.Window(
-                                        block_x * block_width,
-                                        block_y * block_height,
-                                        min(block_width, src.width - block_x * block_width),
-                                        min(block_height, src.height - block_y * block_height)
-                                    )
-                                    
-                                    # Generate plausible random values
-                                    synthetic_data = np.random.normal(
-                                        mean_height, std_height/4,
-                                        (window.height, window.width)
-                                    )
-                                    
-                                    elevation_data[
-                                        window.row_off:window.row_off + window.height,
-                                        window.col_off:window.col_off + window.width
-                                    ] = synthetic_data
+                    # Handle no-data values
+                    no_data = src.nodata
+                    if no_data is not None:
+                        mask = elevation_array == no_data
+                        if mask.any():
+                            print(f"Interpolating {np.sum(mask)} no-data values...")
+                            elevation_array = interpolate_nodata(elevation_array, mask)
                     
-                    print("\nProcessing elevation data...")
-                    
-                    if elevation_range is not None:
-                        min_elev = elevation_range['min']
-                        max_elev = elevation_range['max']
-                    else:
-                        min_elev = np.min(elevation_data)
-                        max_elev = np.min([np.max(elevation_data), 4096])
-                    
-                    print(f"Elevation range: {min_elev:.2f}m to {max_elev:.2f}m")
-                    if np.max(elevation_data) > 4096:
-                        print("Note: Values above 4096m will be clipped")
-                    
-                    # Scale to 16-bit range (16 grayscale levels per meter)
-                    GRAYSCALE_PER_METER = 65536 / 4096
-                    elevation_data_clipped = np.clip(elevation_data, min_elev, 4096)
-                    scaled = ((elevation_data_clipped - min_elev) * GRAYSCALE_PER_METER).astype(np.uint16)
-                    scaled = np.clip(scaled, 0, 65535)
-                    
-                    # Save outputs
-                    print("\nSaving files...")
-                    png_path = os.path.join(output_dir, f"{filename_base}.png")
-                    Image.fromarray(scaled).save(png_path)
-                    
-                    tiff_path = os.path.join(output_dir, f"{filename_base}.tiff")
-                    meta = src.meta.copy()
-                    meta.update({
-                        'dtype': 'uint16',
-                        'width': 4096,
-                        'height': 4096,
-                        'nodata': None
-                    })
-                    
-                    with rasterio.open(tiff_path, 'w', **meta) as dst:
-                        dst.write(scaled, 1)
-                    
-                    return {
-                        "png": png_path, 
-                        "tiff": tiff_path, 
-                        "min_elev": min_elev, 
-                        "max_elev": max_elev, 
-                        "range": max_elev - min_elev,
-                        "worldmap": None,
-                        "location_name": location_name
-                    }
-            
-        except rasterio.errors.RasterioIOError as e:
-            print(f"\nError reading TIFF (attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
+                    # Handle NaN or infinite values
+                    if np.isnan(elevation_array).any() or np.isinf(elevation_array).any():
+                        print("Handling NaN or infinite values...")
+                        mask = np.logical_or(np.isnan(elevation_array), np.isinf(elevation_array))
+                        elevation_array = interpolate_nodata(elevation_array, mask)
+                break
+            except Exception as e:
+                print(f"Error processing elevation data (attempt {attempt+1}): {e}")
+                if attempt == max_retries - 1:
+                    print("Maximum retries reached, aborting.")
+                    return None
                 print("Retrying...")
-                time.sleep(2 ** attempt)
-            else:
-                print("Failed to read TIFF file after all retries")
-                raise
-        except Exception as e:
-            print(f"\nError: {str(e)}")
-            if attempt < max_retries - 1:
-                print(f"Retrying (attempt {attempt + 2}/{max_retries})...")
-                time.sleep(2 ** attempt)
-            else:
-                return None
-            
-    return None
+                time.sleep(1)  # Wait before retrying
+    
+    # Create sanitized filename
+    if location_name:
+        filename = sanitize_filename(location_name)
+    else:
+        filename = "heightmap"
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Resize to 4096x4096 if needed
+    if elevation_array.shape[0] != 4096 or elevation_array.shape[1] != 4096:
+        print(f"Resizing from {elevation_array.shape} to 4096x4096...")
+        from scipy.ndimage import zoom
+        zoom_factor = (4096/elevation_array.shape[0], 4096/elevation_array.shape[1])
+        elevation_array = zoom(elevation_array, zoom_factor, order=1)
+    
+    # Apply elevation range from provided range if available
+    if elevation_range and 'min' in elevation_range and 'max' in elevation_range:
+        min_elevation = elevation_range['min']
+        max_elevation = elevation_range['max']
+    else:
+        # Otherwise, use the range from this data
+        min_elevation = np.min(elevation_array)
+        max_elevation = np.max(elevation_array)
+    
+    # Cap maximum elevation
+    if max_height is not None and max_elevation > max_height:
+        print(f"Capping maximum elevation to {max_height}m")
+        max_elevation = max_height
+    
+    # Expand range slightly to match worldmap if needed
+    if min_elevation > 0:
+        # Ensure some below-sea-level area for proper water features
+        min_elevation = min(min_elevation - 5, -5)  # At least 5m below sea level
+    
+    elevation_range = max_elevation - min_elevation
+    print(f"\nProcessing elevation data...")
+    print(f"Elevation range: {min_elevation:.2f}m to {max_elevation:.2f}m")
+    
+    # Scale to 16-bit (0-65535)
+    print("\nSaving files...")
+    scaled_array = np.clip(elevation_array, min_elevation, max_elevation)
+    scaled_array = ((scaled_array - min_elevation) / (max_elevation - min_elevation) * 65535).astype(np.uint16)
+    
+    # Save as 16-bit grayscale PNG for Cities Skylines 2
+    heightmap_png_path = os.path.join(output_dir, f"{filename}.png")
+    
+    # Convert to proper 16-bit grayscale format
+    # Create a PIL Image with mode 'I' for 16-bit grayscale integer
+    img = Image.fromarray(scaled_array)
+    # Explicitly convert to 16-bit grayscale
+    img = img.convert('I')
+    # Save as PNG with full 16-bit depth
+    img.save(heightmap_png_path, format='PNG')
+    
+    # Save as TIFF too for potential GIS analysis
+    heightmap_tiff_path = os.path.join(output_dir, f"{filename}.tiff")
+    
+    # Update metadata with new dimensions and type
+    meta.update(
+        driver='GTiff',
+        height=scaled_array.shape[0],
+        width=scaled_array.shape[1],
+        count=1,
+        dtype=scaled_array.dtype,
+        compress='lzw'
+    )
+    
+    with rasterio.open(heightmap_tiff_path, 'w', **meta) as dst:
+        dst.write(scaled_array, 1)
+    
+    print(f"Heightmap saved to: {heightmap_png_path} and {heightmap_tiff_path}")
+    
+    # Generate worldmap (extended 4x area) if requested
+    worldmap_paths = None
+    if create_worldmap:
+        worldmap_paths = generate_worldmap(scaled_array, meta, output_dir, min_elev=min_elevation, max_elev=max_elevation, filename_base=filename)
+    
+    return {
+        'png': heightmap_png_path,
+        'tiff': heightmap_tiff_path,
+        'min_elev': min_elevation,
+        'max_elev': max_elevation,
+        'range': max_elevation - min_elevation,
+        'location_name': location_name,
+    }
 
 def fetch_water_data(bbox, zoom, output_dir="elevation_output", max_retries=1, timeout=10):
     """
@@ -1136,13 +943,27 @@ def generate_worldmap(base_heightmap, meta, output_dir, center_lat=None, center_
     print("3. Saving worldmap files...")
     # Save as 16-bit PNG
     worldmap_png_path = os.path.join(output_dir, f"{filename_base}_worldmap.png")
-    Image.fromarray(worldmap).save(worldmap_png_path)
+    
+    # Create a PIL Image and explicitly convert to 16-bit grayscale mode 'I'
+    img = Image.fromarray(worldmap)
+    img = img.convert('I')  # Ensure 16-bit grayscale format
+    
+    # Save as a 16-bit grayscale PNG
+    img.save(worldmap_png_path, format='PNG')
     
     # Save as 16-bit TIFF
     worldmap_tiff_path = os.path.join(output_dir, f"{filename_base}_worldmap.tiff")
     
     # Copy the metadata and update for worldmap
     worldmap_meta = meta.copy()
+    worldmap_meta.update(
+        driver='GTiff',
+        height=worldmap.shape[0],
+        width=worldmap.shape[1],
+        count=1,
+        dtype=worldmap.dtype,
+        compress='lzw'
+    )
     
     with rasterio.open(worldmap_tiff_path, 'w', **worldmap_meta) as dst:
         dst.write(worldmap, 1)

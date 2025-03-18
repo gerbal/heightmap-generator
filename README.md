@@ -150,7 +150,7 @@ The generator creates:
    - Worldmap: `<location_name>_worldmap.png`
    - With bathymetry: `<location_name>_topo_<source>.png`
    
-   The default location is: `C:\Users\<username>\AppData\LocalLow\Colossal Order\Cities Skylines II\Maps`
+   The default location is: `C:\Users\<username>\AppData\LocalLow\Colossal Order\Cities Skylines II\Heightmaps`
 
 2. Start a new game and select "Create New Map"
 3. Choose your heightmap from the list
